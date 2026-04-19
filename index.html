@@ -71,6 +71,8 @@
         min_note_ms: 70,
         range_mode: "standard4",
         time_signature: "4/4",
+        double_tempo: false,
+        auto_double_low_tempo: true,
         correction_mode: "key_aware",
         key_root: "E",
         key_mode: "natural_minor",
@@ -363,7 +365,7 @@
                   <label className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
                     <div>
                       <div className="text-sm font-semibold text-zinc-200">Strict Scale</div>
-                      <div className="text-xs text-zinc-500">Only active in key-aware mode</div>
+                      <div className="text-xs text-zinc-500">Active in key-aware and auto-key modes</div>
                     </div>
                     <input
                       type="checkbox"
@@ -383,6 +385,32 @@
                       type="checkbox"
                       checked={settings.keep_human_feel}
                       onChange={(e) => updateSetting("keep_human_feel", e.target.checked)}
+                      className="h-5 w-5 accent-emerald-500"
+                    />
+                  </label>
+
+                  <label className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-200">Auto Double Tempo</div>
+                      <div className="text-xs text-zinc-500">If BPM is below 70, use double-time grid</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.auto_double_low_tempo}
+                      onChange={(e) => updateSetting("auto_double_low_tempo", e.target.checked)}
+                      className="h-5 w-5 accent-emerald-500"
+                    />
+                  </label>
+
+                  <label className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-200">Force Double Tempo</div>
+                      <div className="text-xs text-zinc-500">Manual half-time fix for bass-only stems</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.double_tempo}
+                      onChange={(e) => updateSetting("double_tempo", e.target.checked)}
                       className="h-5 w-5 accent-emerald-500"
                     />
                   </label>
@@ -437,6 +465,11 @@
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
                           <div className="text-xs uppercase tracking-wide text-zinc-500">Tempo</div>
                           <div className="mt-2 text-2xl font-bold text-white">{Math.round(result.tempo_bpm)} BPM</div>
+                          {result.diagnostics?.tempo_diagnostics?.normalization_action && result.diagnostics.tempo_diagnostics.normalization_action !== "none" && (
+                            <div className="mt-2 text-xs text-emerald-300">
+                              {Math.round(result.diagnostics.tempo_diagnostics.original_tempo_bpm)} → {Math.round(result.diagnostics.tempo_diagnostics.normalized_tempo_bpm)} BPM
+                            </div>
+                          )}
                         </div>
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
                           <div className="text-xs uppercase tracking-wide text-zinc-500">Detected Scale</div>
@@ -532,6 +565,17 @@
                             </div>
                           )}
                         </div>
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                          <div className="text-xs uppercase tracking-wide text-zinc-500">Tempo Grid</div>
+                          <div className="mt-2 text-lg font-bold text-white">{result.diagnostics?.tempo_source || "unknown"}</div>
+                          <div className="mt-3 text-sm text-zinc-400">
+                            Original: {Math.round(result.diagnostics?.tempo_diagnostics?.original_tempo_bpm || result.tempo_bpm)} BPM · Grid: {Math.round(result.diagnostics?.tempo_diagnostics?.normalized_tempo_bpm || result.tempo_bpm)} BPM
+                          </div>
+                          <div className="mt-2 text-xs text-zinc-500">
+                            Action: {result.diagnostics?.tempo_diagnostics?.normalization_action || "none"}
+                          </div>
+                        </div>
+
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
                           <div className="text-xs uppercase tracking-wide text-zinc-500">Corrections</div>
                           <div className="mt-2 text-lg font-bold text-white">{result.corrections?.length || 0}</div>

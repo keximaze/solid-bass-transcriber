@@ -153,6 +153,8 @@ class PipelineSettings(BaseModel):
     range_mode: str = "standard4"
     time_signature: str = "4/4"
     tempo_override: int | None = None
+    double_tempo: bool = False
+    auto_double_low_tempo: bool = True
     correction_mode: str = "key_aware"  # chromatic | key_aware | auto_key | chord_aware
     key_root: str = "E"
     key_mode: str = "natural_minor"  # major | natural_minor
@@ -502,36 +504,66 @@ def estimate_tempo_from_midi(midi_path: Path) -> float | None:
     return float(best_bpm)
 
 
-def resolve_tempo(audio_path: Path, raw_midi_path: Path, settings: PipelineSettings) -> tuple[float, str, dict[str, float | None]]:
-    """Resolve the tempo using override > MIDI > audio > fallback."""
+def normalize_tempo(raw_tempo: float, settings: PipelineSettings) -> tuple[float, str, dict[str, float | bool | str | None]]:
+    """Normalize half-time tempo guesses for bass-only stems."""
+    original = float(raw_tempo or 120.0)
+    normalized = original
+    action = "none"
+
+    if settings.double_tempo:
+        normalized = original * 2.0
+        action = "manual_double"
+    elif settings.auto_double_low_tempo and 40 <= original < 70:
+        normalized = original * 2.0
+        action = "auto_double_low_tempo"
+
+    return normalized, action, {
+        "original_tempo_bpm": round(original, 3),
+        "normalized_tempo_bpm": round(normalized, 3),
+        "double_tempo": bool(settings.double_tempo),
+        "auto_double_low_tempo": bool(settings.auto_double_low_tempo),
+        "normalization_action": action,
+    }
+
+
+def resolve_tempo(audio_path: Path, raw_midi_path: Path, settings: PipelineSettings) -> tuple[float, str, dict[str, float | bool | str | None]]:
+    """Resolve tempo using override > MIDI > audio > fallback, then normalize."""
     if settings.tempo_override and settings.tempo_override > 0:
-        return float(settings.tempo_override), "tempo_override", {
+        tempo, _, normalization = normalize_tempo(float(settings.tempo_override), settings)
+        return tempo, "tempo_override", {
             "tempo_override": float(settings.tempo_override),
             "midi_estimate": None,
             "audio_estimate": None,
+            **normalization,
         }
 
     midi_estimate = estimate_tempo_from_midi(raw_midi_path)
     if midi_estimate is not None:
         audio_estimate = estimate_tempo(audio_path)
-        return float(midi_estimate), "midi_estimate", {
+        tempo, _, normalization = normalize_tempo(float(midi_estimate), settings)
+        return tempo, "midi_estimate", {
             "tempo_override": None,
             "midi_estimate": float(midi_estimate),
             "audio_estimate": float(audio_estimate),
+            **normalization,
         }
 
     audio_estimate = estimate_tempo(audio_path)
     if audio_estimate and audio_estimate > 0:
-        return float(audio_estimate), "audio_estimate", {
+        tempo, _, normalization = normalize_tempo(float(audio_estimate), settings)
+        return tempo, "audio_estimate", {
             "tempo_override": None,
             "midi_estimate": None,
             "audio_estimate": float(audio_estimate),
+            **normalization,
         }
 
-    return 120.0, "fallback_120", {
+    tempo, _, normalization = normalize_tempo(120.0, settings)
+    return tempo, "fallback_120", {
         "tempo_override": None,
         "midi_estimate": None,
         "audio_estimate": None,
+        **normalization,
     }
 
 
@@ -1063,6 +1095,25 @@ class BackendUtilityTests(unittest.TestCase):
         self.assertEqual(tempo, 98.0)
         self.assertEqual(source, "tempo_override")
         self.assertEqual(details["tempo_override"], 98.0)
+
+    def test_normalize_tempo_auto_doubles_low_tempo(self) -> None:
+        settings = PipelineSettings(auto_double_low_tempo=True)
+        tempo, action, details = normalize_tempo(57.0, settings)
+        self.assertEqual(tempo, 114.0)
+        self.assertEqual(action, "auto_double_low_tempo")
+        self.assertEqual(details["original_tempo_bpm"], 57.0)
+
+    def test_normalize_tempo_does_not_double_normal_tempo(self) -> None:
+        settings = PipelineSettings(auto_double_low_tempo=True)
+        tempo, action, _ = normalize_tempo(96.0, settings)
+        self.assertEqual(tempo, 96.0)
+        self.assertEqual(action, "none")
+
+    def test_normalize_tempo_manual_double(self) -> None:
+        settings = PipelineSettings(double_tempo=True)
+        tempo, action, _ = normalize_tempo(80.0, settings)
+        self.assertEqual(tempo, 160.0)
+        self.assertEqual(action, "manual_double")
 
     def test_make_json_error_shape(self) -> None:
         response = make_json_error(418, "teapot", "ExampleError")
