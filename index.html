@@ -34,6 +34,7 @@
     const CORRECTION_OPTIONS = [
       { value: "chromatic", label: "Chromatic", description: "No scale snap. Rawest correction." },
       { value: "key_aware", label: "Key-aware", description: "Snap to selected key and mode." },
+      { value: "auto_key", label: "Auto Key", description: "Detect major or natural minor from the MIDI." },
       { value: "chord_aware", label: "Chord-aware", description: "Coming soon. Per-bar harmonic correction." },
     ];
     const STRING_ORDER = ["G", "D", "A", "E", "B"];
@@ -49,6 +50,7 @@
 
     function buildDetectedKeyLabel(settings) {
       if (settings.correction_mode === "chromatic") return "Chromatic";
+      if (settings.correction_mode === "auto_key") return "Auto-detect";
       return `${settings.key_root} ${settings.key_mode === "major" ? "major" : "natural minor"}`;
     }
 
@@ -117,6 +119,9 @@
             next.strict_scale = false;
           }
           if (key === "correction_mode" && value === "key_aware") {
+            next.strict_scale = true;
+          }
+          if (key === "correction_mode" && value === "auto_key") {
             next.strict_scale = true;
           }
           return next;
@@ -284,6 +289,11 @@
                     </div>
                     <div className="mt-3 rounded-xl bg-zinc-900 px-3 py-2 text-xs text-zinc-400">
                       Effective target: <span className="font-semibold text-zinc-200">{buildDetectedKeyLabel(settings)}</span>
+                      {settings.correction_mode === "auto_key" && (
+                        <div className="mt-2 text-[11px] text-emerald-300">
+                          Auto Key will detect major or natural minor after transcription.
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -359,7 +369,7 @@
                       type="checkbox"
                       checked={settings.strict_scale}
                       onChange={(e) => updateSetting("strict_scale", e.target.checked)}
-                      disabled={settings.correction_mode !== "key_aware"}
+                      disabled={!["key_aware", "auto_key"].includes(settings.correction_mode)}
                       className="h-5 w-5 accent-emerald-500 disabled:opacity-50"
                     />
                   </label>
@@ -510,6 +520,17 @@
                           <div className="text-xs uppercase tracking-wide text-zinc-500">Correction Mode</div>
                           <div className="mt-2 text-lg font-bold text-white">{result.diagnostics?.correction_mode || settings.correction_mode}</div>
                           <div className="mt-3 text-sm text-zinc-400">Key root: {result.diagnostics?.key_root || settings.key_root} · Mode: {result.diagnostics?.key_mode || settings.key_mode}</div>
+                          {result.diagnostics?.auto_key_diagnostics && (
+                            <div className="mt-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-200">
+                              <div className="font-bold">Auto Key: {result.diagnostics.auto_key_diagnostics.detected_key || "Unknown"}</div>
+                              <div className="mt-1">Confidence: {Math.round((result.diagnostics.auto_key_diagnostics.confidence || 0) * 100)}%</div>
+                              {Array.isArray(result.diagnostics.auto_key_diagnostics.candidates) && (
+                                <div className="mt-2 text-zinc-300">
+                                  Top candidates: {result.diagnostics.auto_key_diagnostics.candidates.slice(0, 3).map((candidate) => candidate.detected_key).join(", ")}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
                           <div className="text-xs uppercase tracking-wide text-zinc-500">Corrections</div>
