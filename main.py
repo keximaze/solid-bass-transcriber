@@ -153,7 +153,9 @@ class PipelineSettings(BaseModel):
     range_mode: str = "standard4"
     time_signature: str = "4/4"
     tempo_override: int | None = None
-    correction_mode: str = "key_aware"  # chromatic | key_aware | chord_aware
+    double_tempo: bool = False
+    auto_double_low_tempo: bool = True
+    correction_mode: str = "key_aware"  # chromatic | key_aware | auto_key | chord_aware
     key_root: str = "E"
     key_mode: str = "natural_minor"  # major | natural_minor
 
@@ -256,6 +258,108 @@ def parse_scale(key_name: str) -> tuple[int | None, set[int] | None]:
         return None, None
 
 
+def pitch_class_name(pc: int) -> str:
+    names = {
+        0: "C",
+        1: "C#",
+        2: "D",
+        3: "Eb",
+        4: "E",
+        5: "F",
+        6: "F#",
+        7: "G",
+        8: "Ab",
+        9: "A",
+        10: "Bb",
+        11: "B",
+    }
+    return names[pc % 12]
+
+
+def score_scale_fit(histogram: dict[int, float], tonic: int, template: set[int]) -> float:
+    allowed = {(tonic + interval) % 12 for interval in template}
+    score = 0.0
+
+    for pc, weight in histogram.items():
+        if pc in allowed:
+            score += weight
+        else:
+            score -= weight * 0.75
+
+    score += histogram.get(tonic, 0.0) * 0.35
+    score += histogram.get((tonic + 7) % 12, 0.0) * 0.15
+    return score
+
+
+def detect_key_from_midi(midi_path: Path) -> dict[str, Any]:
+    """Detect likely key center from MIDI pitch-class duration weights."""
+    try:
+        pm, _ = load_pretty_midi(midi_path)
+    except Exception:
+        return {
+            "detected_key": None,
+            "key_root": None,
+            "key_mode": None,
+            "confidence": 0.0,
+            "candidates": [],
+        }
+
+    histogram: dict[int, float] = {pc: 0.0 for pc in range(12)}
+
+    for instrument in pm.instruments:
+        for note in instrument.notes:
+            duration = max(0.01, float(note.end - note.start))
+            histogram[int(note.pitch) % 12] += duration
+
+    total = sum(histogram.values())
+    if total <= 0:
+        return {
+            "detected_key": None,
+            "key_root": None,
+            "key_mode": None,
+            "confidence": 0.0,
+            "candidates": [],
+        }
+
+    normalized = {pc: weight / total for pc, weight in histogram.items()}
+    candidates: list[dict[str, Any]] = []
+
+    for tonic in range(12):
+        major_score = score_scale_fit(normalized, tonic, MAJOR_SCALE)
+        minor_score = score_scale_fit(normalized, tonic, MINOR_SCALE)
+
+        candidates.append(
+            {
+                "key_root": pitch_class_name(tonic),
+                "key_mode": "major",
+                "detected_key": f"{pitch_class_name(tonic)} major",
+                "score": round(float(major_score), 6),
+            }
+        )
+        candidates.append(
+            {
+                "key_root": pitch_class_name(tonic),
+                "key_mode": "natural_minor",
+                "detected_key": f"{pitch_class_name(tonic)} natural minor",
+                "score": round(float(minor_score), 6),
+            }
+        )
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    best = candidates[0]
+    second = candidates[1] if len(candidates) > 1 else {"score": 0.0}
+
+    confidence = max(0.0, min(1.0, float(best["score"] - second["score"]) * 3.0))
+
+    return {
+        "detected_key": best["detected_key"],
+        "key_root": best["key_root"],
+        "key_mode": best["key_mode"],
+        "confidence": round(confidence, 4),
+        "candidates": candidates[:5],
+    }
+
+
 def build_scale_from_settings(settings: PipelineSettings) -> tuple[int | None, set[int] | None, str]:
     """Resolve the active musical scale from explicit mode settings.
 
@@ -265,6 +369,10 @@ def build_scale_from_settings(settings: PipelineSettings) -> tuple[int | None, s
     correction_mode = (settings.correction_mode or "key_aware").lower()
     if correction_mode == "chromatic":
         return None, None, "Chromatic"
+
+    if correction_mode == "auto_key":
+        tonic, allowed = parse_scale(settings.detected_key)
+        return tonic, allowed, settings.detected_key
 
     root = (settings.key_root or "").strip()
     mode = (settings.key_mode or "").strip().lower()
@@ -396,36 +504,66 @@ def estimate_tempo_from_midi(midi_path: Path) -> float | None:
     return float(best_bpm)
 
 
-def resolve_tempo(audio_path: Path, raw_midi_path: Path, settings: PipelineSettings) -> tuple[float, str, dict[str, float | None]]:
-    """Resolve the tempo using override > MIDI > audio > fallback."""
+def normalize_tempo(raw_tempo: float, settings: PipelineSettings) -> tuple[float, str, dict[str, float | bool | str | None]]:
+    """Normalize half-time tempo guesses for bass-only stems."""
+    original = float(raw_tempo or 120.0)
+    normalized = original
+    action = "none"
+
+    if settings.double_tempo:
+        normalized = original * 2.0
+        action = "manual_double"
+    elif settings.auto_double_low_tempo and 40 <= original < 70:
+        normalized = original * 2.0
+        action = "auto_double_low_tempo"
+
+    return normalized, action, {
+        "original_tempo_bpm": round(original, 3),
+        "normalized_tempo_bpm": round(normalized, 3),
+        "double_tempo": bool(settings.double_tempo),
+        "auto_double_low_tempo": bool(settings.auto_double_low_tempo),
+        "normalization_action": action,
+    }
+
+
+def resolve_tempo(audio_path: Path, raw_midi_path: Path, settings: PipelineSettings) -> tuple[float, str, dict[str, float | bool | str | None]]:
+    """Resolve tempo using override > MIDI > audio > fallback, then normalize."""
     if settings.tempo_override and settings.tempo_override > 0:
-        return float(settings.tempo_override), "tempo_override", {
+        tempo, _, normalization = normalize_tempo(float(settings.tempo_override), settings)
+        return tempo, "tempo_override", {
             "tempo_override": float(settings.tempo_override),
             "midi_estimate": None,
             "audio_estimate": None,
+            **normalization,
         }
 
     midi_estimate = estimate_tempo_from_midi(raw_midi_path)
     if midi_estimate is not None:
         audio_estimate = estimate_tempo(audio_path)
-        return float(midi_estimate), "midi_estimate", {
+        tempo, _, normalization = normalize_tempo(float(midi_estimate), settings)
+        return tempo, "midi_estimate", {
             "tempo_override": None,
             "midi_estimate": float(midi_estimate),
             "audio_estimate": float(audio_estimate),
+            **normalization,
         }
 
     audio_estimate = estimate_tempo(audio_path)
     if audio_estimate and audio_estimate > 0:
-        return float(audio_estimate), "audio_estimate", {
+        tempo, _, normalization = normalize_tempo(float(audio_estimate), settings)
+        return tempo, "audio_estimate", {
             "tempo_override": None,
             "midi_estimate": None,
             "audio_estimate": float(audio_estimate),
+            **normalization,
         }
 
-    return 120.0, "fallback_120", {
+    tempo, _, normalization = normalize_tempo(120.0, settings)
+    return tempo, "fallback_120", {
         "tempo_override": None,
         "midi_estimate": None,
         "audio_estimate": None,
+        **normalization,
     }
 
 
@@ -771,6 +909,15 @@ async def transcribe_bass(file: UploadFile = File(...), settings_json: str = For
         raw_midi_path, raw_issues, transcription_meta = transcribe_with_basic_pitch(wav_path, run_dir)
         tempo_bpm, tempo_source, tempo_diagnostics = resolve_tempo(wav_path, raw_midi_path, settings)
 
+        auto_key_diagnostics: dict[str, Any] | None = None
+        if settings.correction_mode.lower() == "auto_key":
+            auto_key_diagnostics = detect_key_from_midi(raw_midi_path)
+            if auto_key_diagnostics.get("detected_key"):
+                settings.detected_key = str(auto_key_diagnostics["detected_key"])
+                settings.key_root = str(auto_key_diagnostics["key_root"])
+                settings.key_mode = str(auto_key_diagnostics["key_mode"])
+                settings.strict_scale = True
+
         clean_midi_path = run_dir / "bass_clean.mid"
         note_count, corrections, resolved_scale_name = cleanup_bass_midi(
             midi_path=raw_midi_path,
@@ -812,6 +959,7 @@ async def transcribe_bass(file: UploadFile = File(...), settings_json: str = For
             "key_mode": settings.key_mode,
             "tempo_source": tempo_source,
             "tempo_diagnostics": tempo_diagnostics,
+            "auto_key_diagnostics": auto_key_diagnostics,
         }
 
         return {
@@ -909,6 +1057,19 @@ class BackendUtilityTests(unittest.TestCase):
         self.assertIsNone(scale)
         self.assertEqual(label, "Chromatic")
 
+    def test_pitch_class_name(self) -> None:
+        self.assertEqual(pitch_class_name(10), "Bb")
+        self.assertEqual(pitch_class_name(13), "C#")
+
+    def test_score_scale_fit_prefers_matching_scale(self) -> None:
+        histogram = {pc: 0.0 for pc in range(12)}
+        for pc in [7, 9, 10, 0, 2, 3, 5]:
+            histogram[pc] = 1.0
+        self.assertGreater(
+            score_scale_fit(histogram, 7, MINOR_SCALE),
+            score_scale_fit(histogram, 7, MAJOR_SCALE),
+        )
+
     def test_range_limits(self) -> None:
         self.assertEqual(range_limits("standard4"), (28, 67))
         self.assertEqual(range_limits("five"), (23, 67))
@@ -935,14 +1096,36 @@ class BackendUtilityTests(unittest.TestCase):
         self.assertEqual(source, "tempo_override")
         self.assertEqual(details["tempo_override"], 98.0)
 
+    def test_normalize_tempo_auto_doubles_low_tempo(self) -> None:
+        settings = PipelineSettings(auto_double_low_tempo=True)
+        tempo, action, details = normalize_tempo(57.0, settings)
+        self.assertEqual(tempo, 114.0)
+        self.assertEqual(action, "auto_double_low_tempo")
+        self.assertEqual(details["original_tempo_bpm"], 57.0)
+
+    def test_normalize_tempo_does_not_double_normal_tempo(self) -> None:
+        settings = PipelineSettings(auto_double_low_tempo=True)
+        tempo, action, _ = normalize_tempo(96.0, settings)
+        self.assertEqual(tempo, 96.0)
+        self.assertEqual(action, "none")
+
+    def test_normalize_tempo_manual_double(self) -> None:
+        settings = PipelineSettings(double_tempo=True)
+        tempo, action, _ = normalize_tempo(80.0, settings)
+        self.assertEqual(tempo, 160.0)
+        self.assertEqual(action, "manual_double")
+
     def test_make_json_error_shape(self) -> None:
         response = make_json_error(418, "teapot", "ExampleError")
-        if hasattr(response, "content"):
+        self.assertEqual(response.status_code, 418)
+
+        if hasattr(response, "body"):
+            payload = json.loads(response.body.decode("utf-8"))
+            self.assertEqual(payload["detail"], "teapot")
+            self.assertEqual(payload["error_type"], "ExampleError")
+        else:
             self.assertEqual(response.content["detail"], "teapot")
             self.assertEqual(response.content["error_type"], "ExampleError")
-            self.assertEqual(response.status_code, 418)
-        else:
-            self.assertEqual(response["detail"], "teapot")
 
     def test_validate_upload_filename_rejects_txt(self) -> None:
         with self.assertRaises(HTTPException) as context:
