@@ -4,3 +4,6 @@ __pycache__/
 data/
 .DS_Store
 .env
+bass_midi_notation_app_prototype.jsx
+bass_midi_notation_backend_fastapi.py
+solid_bass_transcriber_frontend_index.html
