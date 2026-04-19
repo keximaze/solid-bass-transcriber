@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Solid Bass Transcriber</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .progress-bar { transition: width 0.25s ease; }
+    .fade-up { animation: fadeUp 0.25s ease; }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body class="bg-zinc-950 text-zinc-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useMemo, useState } = React;
+
+    const API_BASE = "http://127.0.0.1:8000";
+    const ROOT_OPTIONS = ["C", "C#", "Db", "D", "D#", "Eb", "E", "F", "F#", "Gb", "G", "G#", "Ab", "A", "A#", "Bb", "B"];
+    const MODE_OPTIONS = [
+      { value: "major", label: "Major" },
+      { value: "natural_minor", label: "Natural Minor" },
+    ];
+    const CORRECTION_OPTIONS = [
+      { value: "chromatic", label: "Chromatic", description: "No scale snap. Rawest correction." },
+      { value: "key_aware", label: "Key-aware", description: "Snap to selected key and mode." },
+      { value: "chord_aware", label: "Chord-aware", description: "Coming soon. Per-bar harmonic correction." },
+    ];
+    const STRING_ORDER = ["G", "D", "A", "E", "B"];
+
+    function classNames(...values) {
+      return values.filter(Boolean).join(" ");
+    }
+
+    function formatBeat(beat) {
+      if (typeof beat !== "number") return "-";
+      return Number.isInteger(beat) ? String(beat) : beat.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+    }
+
+    function buildDetectedKeyLabel(settings) {
+      if (settings.correction_mode === "chromatic") return "Chromatic";
+      return `${settings.key_root} ${settings.key_mode === "major" ? "major" : "natural minor"}`;
+    }
+
+    function App() {
+      const [file, setFile] = useState(null);
+      const [fileName, setFileName] = useState("");
+      const [isProcessing, setIsProcessing] = useState(false);
+      const [progress, setProgress] = useState(0);
+      const [currentStep, setCurrentStep] = useState(0);
+      const [result, setResult] = useState(null);
+      const [error, setError] = useState(null);
+      const [settings, setSettings] = useState({
+        detected_key: "E minor",
+        strict_scale: true,
+        keep_human_feel: true,
+        export_tab: true,
+        quantize_percent: 15,
+        min_note_ms: 70,
+        range_mode: "standard4",
+        time_signature: "4/4",
+        correction_mode: "key_aware",
+        key_root: "E",
+        key_mode: "natural_minor",
+      });
+
+      const steps = [
+        { key: "upload", title: "Upload" },
+        { key: "analyze", title: "Analyze" },
+        { key: "transcribe", title: "Transcribe" },
+        { key: "correct", title: "Correct" },
+        { key: "export", title: "Export" },
+      ];
+
+      const tabRows = useMemo(() => {
+        const notes = result?.tab_preview || [];
+        const groups = {};
+
+        notes.forEach((note) => {
+          const bar = note.bar || 1;
+          if (!groups[bar]) groups[bar] = [];
+          groups[bar].push(note);
+        });
+
+        return Object.entries(groups).map(([bar, notesInBar]) => ({
+          bar: Number(bar),
+          notes: notesInBar,
+        }));
+      }, [result]);
+
+      const handleFileChange = (e) => {
+        const selectedFile = e.target.files?.[0];
+        if (!selectedFile) return;
+        setFile(selectedFile);
+        setFileName(selectedFile.name);
+        setResult(null);
+        setError(null);
+      };
+
+      const updateSetting = (key, value) => {
+        setSettings((prev) => {
+          const next = { ...prev, [key]: value };
+          if (key === "key_root" || key === "key_mode") {
+            next.detected_key = `${next.key_root} ${next.key_mode === "major" ? "major" : "minor"}`;
+          }
+          if (key === "correction_mode" && value === "chromatic") {
+            next.strict_scale = false;
+          }
+          if (key === "correction_mode" && value === "key_aware") {
+            next.strict_scale = true;
+          }
+          return next;
+        });
+      };
+
+      const processAudio = async () => {
+        if (!file || isProcessing) return;
+
+        setIsProcessing(true);
+        setProgress(5);
+        setCurrentStep(0);
+        setError(null);
+        setResult(null);
+
+        const effectiveSettings = {
+          ...settings,
+          detected_key: buildDetectedKeyLabel(settings).replace(" natural minor", " minor"),
+        };
+
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("settings_json", JSON.stringify(effectiveSettings));
+
+        let progressTimer = null;
+
+        try {
+          progressTimer = window.setInterval(() => {
+            setProgress((prev) => {
+              const next = Math.min(prev + 7, 92);
+              setCurrentStep(Math.min(Math.floor(next / 20), 4));
+              return next;
+            });
+          }, 260);
+
+          const response = await fetch(`${API_BASE}/api/transcribe`, {
+            method: "POST",
+            body: formData,
+          });
+
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.detail || "Transcription failed");
+          }
+
+          setResult(data);
+          setProgress(100);
+          setCurrentStep(4);
+        } catch (err) {
+          setError(err.message || "Unknown error");
+          setProgress(0);
+          setCurrentStep(0);
+        } finally {
+          if (progressTimer) window.clearInterval(progressTimer);
+          setIsProcessing(false);
+        }
+      };
+
+      const openExport = (url) => {
+        window.open(`${API_BASE}${url}`, "_blank", "noopener,noreferrer");
+      };
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-zinc-950 via-zinc-950 to-zinc-900 p-4 md:p-8">
+          <div className="mx-auto max-w-7xl space-y-6">
+            <header className="rounded-[28px] border border-zinc-800 bg-zinc-900/80 p-6 shadow-2xl backdrop-blur">
+              <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <p className="text-sm font-semibold uppercase tracking-[0.25em] text-emerald-400">Bass AI Workflow</p>
+                  <h1 className="mt-2 text-3xl font-extrabold tracking-tight text-white md:text-5xl">Solid Bass Transcriber</h1>
+                  <p className="mt-3 max-w-2xl text-sm text-zinc-400 md:text-base">
+                    Audio to MIDI, notation, and bass TAB with correction modes inspired by pro editing workflows.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-3 md:w-[340px]">
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <div className="text-xs uppercase tracking-wide text-zinc-500">Mode</div>
+                    <div className="mt-1 text-sm font-semibold text-white">{CORRECTION_OPTIONS.find((option) => option.value === settings.correction_mode)?.label}</div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <div className="text-xs uppercase tracking-wide text-zinc-500">Target Key</div>
+                    <div className="mt-1 text-sm font-semibold text-white">{buildDetectedKeyLabel(settings)}</div>
+                  </div>
+                </div>
+              </div>
+            </header>
+
+            <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+              <section className="space-y-6 rounded-[28px] border border-zinc-800 bg-zinc-900/80 p-6 shadow-2xl backdrop-blur">
+                <div>
+                  <h2 className="text-xl font-bold text-white">1. Input + Correction Setup</h2>
+                  <p className="mt-1 text-sm text-zinc-400">Choose your audio file, correction mode, key center, and bass behavior.</p>
+                </div>
+
+                <div className="rounded-[24px] border-2 border-dashed border-zinc-700 bg-zinc-950/70 p-8 text-center transition hover:border-emerald-500/60">
+                  <input
+                    type="file"
+                    accept=".wav,.mp3,.flac,.aiff,.aif,.m4a"
+                    onChange={handleFileChange}
+                    className="hidden"
+                    id="audio-input"
+                  />
+                  <label htmlFor="audio-input" className="cursor-pointer">
+                    <div className="text-5xl">🎸</div>
+                    <div className="mt-3 text-lg font-semibold text-white">{fileName || "Choose isolated bass audio"}</div>
+                    <div className="mt-2 text-sm text-zinc-400">WAV recommended. MP3/FLAC/AIFF supported.</div>
+                  </label>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <label className="mb-3 block text-sm font-semibold text-zinc-200">Correction Mode</label>
+                    <div className="space-y-2">
+                      {CORRECTION_OPTIONS.map((option) => {
+                        const disabled = option.value === "chord_aware";
+                        const selected = settings.correction_mode === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => !disabled && updateSetting("correction_mode", option.value)}
+                            className={classNames(
+                              "w-full rounded-2xl border p-3 text-left transition",
+                              disabled && "cursor-not-allowed opacity-50",
+                              selected ? "border-emerald-500 bg-emerald-500/10" : "border-zinc-800 bg-zinc-900 hover:border-zinc-700"
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="font-semibold text-white">{option.label}</span>
+                              {disabled && <span className="rounded-full bg-zinc-800 px-2 py-1 text-[10px] uppercase tracking-wide text-zinc-400">Soon</span>}
+                            </div>
+                            <div className="mt-1 text-xs text-zinc-400">{option.description}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <label className="mb-3 block text-sm font-semibold text-zinc-200">Key Center</label>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="mb-2 block text-xs uppercase tracking-wide text-zinc-500">Root</label>
+                        <select
+                          value={settings.key_root}
+                          onChange={(e) => updateSetting("key_root", e.target.value)}
+                          disabled={settings.correction_mode !== "key_aware"}
+                          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-3 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {ROOT_OPTIONS.map((root) => <option key={root} value={root}>{root}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="mb-2 block text-xs uppercase tracking-wide text-zinc-500">Mode</label>
+                        <select
+                          value={settings.key_mode}
+                          onChange={(e) => updateSetting("key_mode", e.target.value)}
+                          disabled={settings.correction_mode !== "key_aware"}
+                          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-3 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {MODE_OPTIONS.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="mt-3 rounded-xl bg-zinc-900 px-3 py-2 text-xs text-zinc-400">
+                      Effective target: <span className="font-semibold text-zinc-200">{buildDetectedKeyLabel(settings)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <label className="mb-2 block text-sm font-semibold text-zinc-200">Bass Range</label>
+                    <select
+                      value={settings.range_mode}
+                      onChange={(e) => updateSetting("range_mode", e.target.value)}
+                      className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-3 text-white"
+                    >
+                      <option value="standard4">4-string standard</option>
+                      <option value="five">5-string</option>
+                      <option value="drop">Drop tuning</option>
+                    </select>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <label className="mb-2 block text-sm font-semibold text-zinc-200">Time Signature</label>
+                    <select
+                      value={settings.time_signature}
+                      onChange={(e) => updateSetting("time_signature", e.target.value)}
+                      className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-3 text-white"
+                    >
+                      <option value="4/4">4/4</option>
+                      <option value="3/4">3/4</option>
+                      <option value="6/8">6/8</option>
+                      <option value="12/8">12/8</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-semibold text-zinc-200">Quantize</label>
+                      <span className="text-xs text-zinc-400">{settings.quantize_percent}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={settings.quantize_percent}
+                      onChange={(e) => updateSetting("quantize_percent", Number(e.target.value))}
+                      className="mt-3 w-full"
+                    />
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-semibold text-zinc-200">Min Note</label>
+                      <span className="text-xs text-zinc-400">{settings.min_note_ms} ms</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="30"
+                      max="200"
+                      step="5"
+                      value={settings.min_note_ms}
+                      onChange={(e) => updateSetting("min_note_ms", Number(e.target.value))}
+                      className="mt-3 w-full"
+                    />
+                  </div>
+
+                  <label className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-200">Strict Scale</div>
+                      <div className="text-xs text-zinc-500">Only active in key-aware mode</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.strict_scale}
+                      onChange={(e) => updateSetting("strict_scale", e.target.checked)}
+                      disabled={settings.correction_mode !== "key_aware"}
+                      className="h-5 w-5 accent-emerald-500 disabled:opacity-50"
+                    />
+                  </label>
+
+                  <label className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-200">Human Feel</div>
+                      <div className="text-xs text-zinc-500">Preserve groove and velocity</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.keep_human_feel}
+                      onChange={(e) => updateSetting("keep_human_feel", e.target.checked)}
+                      className="h-5 w-5 accent-emerald-500"
+                    />
+                  </label>
+                </div>
+
+                <button
+                  onClick={processAudio}
+                  disabled={!file || isProcessing}
+                  className="w-full rounded-2xl bg-emerald-500 px-5 py-4 text-base font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isProcessing ? "Processing Bass Stem..." : "Start Transcription"}
+                </button>
+              </section>
+
+              <section className="space-y-6">
+                <div className="rounded-[28px] border border-zinc-800 bg-zinc-900/80 p-6 shadow-2xl backdrop-blur">
+                  <h2 className="text-xl font-bold text-white">2. Pipeline Progress</h2>
+                  <div className="mt-4 h-4 overflow-hidden rounded-full bg-zinc-800">
+                    <div className="progress-bar h-full rounded-full bg-emerald-500" style={{ width: `${progress}%` }} />
+                  </div>
+                  <div className="mt-2 text-right text-xs text-zinc-400">{progress}%</div>
+                  <div className="mt-5 grid grid-cols-5 gap-2">
+                    {steps.map((step, index) => {
+                      const active = index <= currentStep && (progress > 0 || result);
+                      return (
+                        <div
+                          key={step.key}
+                          className={classNames(
+                            "rounded-2xl border p-3 text-center text-xs font-semibold transition",
+                            active ? "border-emerald-500 bg-emerald-500/10 text-emerald-300" : "border-zinc-800 bg-zinc-950 text-zinc-500"
+                          )}
+                        >
+                          {step.title}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {error && (
+                  <div className="fade-up rounded-[28px] border border-red-800 bg-red-950/40 p-5 shadow-xl">
+                    <div className="text-sm font-bold uppercase tracking-wide text-red-300">Error</div>
+                    <div className="mt-2 text-sm text-red-200">{error}</div>
+                  </div>
+                )}
+
+                {result && (
+                  <div className="fade-up space-y-6">
+                    <div className="rounded-[28px] border border-zinc-800 bg-zinc-900/80 p-6 shadow-2xl backdrop-blur">
+                      <h2 className="text-xl font-bold text-white">3. Result Snapshot</h2>
+                      <div className="mt-4 grid gap-4 md:grid-cols-2">
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                          <div className="text-xs uppercase tracking-wide text-zinc-500">Tempo</div>
+                          <div className="mt-2 text-2xl font-bold text-white">{Math.round(result.tempo_bpm)} BPM</div>
+                        </div>
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                          <div className="text-xs uppercase tracking-wide text-zinc-500">Detected Scale</div>
+                          <div className="mt-2 text-xl font-bold text-white">{result.detected_key}</div>
+                        </div>
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                          <div className="text-xs uppercase tracking-wide text-zinc-500">Clean Notes</div>
+                          <div className="mt-2 text-2xl font-bold text-white">{result.note_count}</div>
+                        </div>
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                          <div className="text-xs uppercase tracking-wide text-zinc-500">Time Signature</div>
+                          <div className="mt-2 text-xl font-bold text-white">{result.time_signature}</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        {result.exports?.midi && (
+                          <button onClick={() => openExport(result.exports.midi)} className="rounded-2xl bg-emerald-500 px-4 py-3 text-sm font-bold text-zinc-950 hover:bg-emerald-400">Download MIDI</button>
+                        )}
+                        {result.exports?.musicxml && (
+                          <button onClick={() => openExport(result.exports.musicxml)} className="rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm font-bold text-white hover:border-zinc-500">Download MusicXML</button>
+                        )}
+                        {result.exports?.tab_json && (
+                          <button onClick={() => openExport(result.exports.tab_json)} className="rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm font-bold text-white hover:border-zinc-500">Download TAB JSON</button>
+                        )}
+                        {result.exports?.pdf && (
+                          <button onClick={() => openExport(result.exports.pdf)} className="rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm font-bold text-white hover:border-zinc-500">Download PDF</button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-[28px] border border-zinc-800 bg-zinc-900/80 p-6 shadow-2xl backdrop-blur">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <h2 className="text-xl font-bold text-white">4. TAB Preview</h2>
+                          <p className="mt-1 text-sm text-zinc-400">String + fret suggestions from the cleaned MIDI output.</p>
+                        </div>
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-400">
+                          Showing first {result.tab_preview?.length || 0} notes
+                        </div>
+                      </div>
+
+                      <div className="mt-5 space-y-4">
+                        {tabRows.length === 0 ? (
+                          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 text-sm text-zinc-400">No tab preview available yet.</div>
+                        ) : (
+                          tabRows.map((group) => (
+                            <div key={group.bar} className="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-950">
+                              <div className="border-b border-zinc-800 px-4 py-3 text-sm font-bold text-white">Bar {group.bar}</div>
+                              <div className="overflow-x-auto px-4 py-4">
+                                <div className="min-w-[720px] space-y-3">
+                                  {STRING_ORDER.filter((stringName) => group.notes.some((note) => note.string === stringName)).map((stringName) => (
+                                    <div key={stringName} className="grid grid-cols-[52px_1fr] items-center gap-3">
+                                      <div className="text-right text-sm font-bold text-zinc-400">{stringName}</div>
+                                      <div className="flex flex-wrap gap-2">
+                                        {group.notes.filter((note) => note.string === stringName).map((note) => (
+                                          <div
+                                            key={`${group.bar}-${stringName}-${note.index}`}
+                                            className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-center"
+                                            title={`Pitch ${note.pitch} • Beat ${formatBeat(note.beat)} • ${note.duration}s`}
+                                          >
+                                            <div className="text-sm font-extrabold text-emerald-300">{note.fret}</div>
+                                            <div className="text-[10px] uppercase tracking-wide text-zinc-500">Beat {formatBeat(note.beat)}</div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-[28px] border border-zinc-800 bg-zinc-900/80 p-6 shadow-2xl backdrop-blur">
+                      <h2 className="text-xl font-bold text-white">5. Diagnostics</h2>
+                      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                          <div className="text-xs uppercase tracking-wide text-zinc-500">Correction Mode</div>
+                          <div className="mt-2 text-lg font-bold text-white">{result.diagnostics?.correction_mode || settings.correction_mode}</div>
+                          <div className="mt-3 text-sm text-zinc-400">Key root: {result.diagnostics?.key_root || settings.key_root} · Mode: {result.diagnostics?.key_mode || settings.key_mode}</div>
+                        </div>
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                          <div className="text-xs uppercase tracking-wide text-zinc-500">Corrections</div>
+                          <div className="mt-2 text-lg font-bold text-white">{result.corrections?.length || 0}</div>
+                          <div className="mt-3 text-sm text-zinc-400">Short-note cleanup, range fixes, quantization, and optional scale snap.</div>
+                        </div>
+                      </div>
+
+                      {result.corrections?.length > 0 && (
+                        <div className="mt-5 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
+                          <div className="border-b border-zinc-800 px-4 py-3 text-sm font-bold text-white">First 12 Corrections</div>
+                          <div className="max-h-80 overflow-y-auto">
+                            {result.corrections.slice(0, 12).map((correction, index) => (
+                              <div key={index} className="border-b border-zinc-900 px-4 py-3 text-sm last:border-b-0">
+                                <div className="font-semibold text-zinc-200">{correction.issue}</div>
+                                <div className="mt-1 text-zinc-400">
+                                  {typeof correction.from_pitch !== "undefined" && typeof correction.to_pitch !== "undefined"
+                                    ? `${correction.from_pitch} → ${correction.to_pitch}`
+                                    : correction.action || "Adjustment"}
+                                </div>
+                                {Array.isArray(correction.actions) && correction.actions.length > 0 && (
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    {correction.actions.map((action) => (
+                                      <span key={action} className="rounded-full bg-zinc-800 px-2 py-1 text-[10px] uppercase tracking-wide text-zinc-300">{action}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
